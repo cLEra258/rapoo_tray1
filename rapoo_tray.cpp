@@ -1,5 +1,4 @@
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
+#define NOMINMAX  // 只保留这个，防止 std::max 冲突
 #include <windows.h>
 #include <shellapi.h>
 #include <hidapi/hidapi.h>
@@ -12,6 +11,9 @@
 #include <cstdio>
 
 #pragma comment(lib, "gdiplus.lib")
+#pragma comment(lib, "user32.lib")
+#pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "shell32.lib")
 
 using namespace Gdiplus;
 
