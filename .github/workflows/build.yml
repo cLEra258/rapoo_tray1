@@ -11,8 +11,6 @@ jobs:
         uses: lukka/run-vcpkg@v11
         with:
           vcpkgGitCommitId: 'ef7dbf94b9198bc58f45951adcf1f041fcbc5ea0'
-          runVcpkgInstall: true
-          vcpkgAdditionalInstallOptions: '--triplet x64-windows-static'
 
       - name: Configure CMake
         shell: pwsh
