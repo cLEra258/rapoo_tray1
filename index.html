@@ -1,124 +1,39 @@
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <title>Rapoo 控制台</title>
-    <style>
-        body { font-family: system-ui, sans-serif; text-align: center; padding: 20px; background: #f9fafb; }
-        button { padding: 10px 20px; font-size: 16px; cursor: pointer; background: #4f46e5; color: white; border: none; border-radius: 6px; }
-        #status { margin-top: 15px; font-weight: bold; color: #374151; }
-    </style>
-</head>
-<body>
-    <h2>Rapoo 电量托盘程序</h2>
-    <p>请点击下方按钮连接设备。连接后可以关闭此窗口，程序将在系统托盘后台运行。</p>
-    <button id="connectBtn">连接 Rapoo 设备</button>
-    <div id="status">未连接</div>
-
-    <script>
-        const connectBtn = document.getElementById('connectBtn');
-        const statusEl = document.getElementById('status');
-        
-        let device = null;
-
-        // 生成图标 (64x64 Canvas 转 Base64)
-        function createIconBase64(pct) {
-            const canvas = document.createElement('canvas');
-            canvas.width = 64;
-            canvas.height = 64;
-            const ctx = canvas.getContext('2d');
-
-            // 背景透明
-            ctx.clearRect(0, 0, 64, 64);
-
-            // 电池外框
-            ctx.fillStyle = '#464646';
-            ctx.beginPath();
-            ctx.roundRect(6, 18, 46, 30, 8); // 主体
-            ctx.fill();
-            ctx.beginPath();
-            ctx.roundRect(52, 26, 6, 14, 2); // 凸起
-            ctx.fill();
-
-            // 内衬
-            ctx.fillStyle = '#fafafa';
-            ctx.beginPath();
-            ctx.roundRect(10, 22, 38, 22, 4);
-            ctx.fill();
-
-            // 电量填充
-            if (pct > 0) {
-                let color = pct < 20 ? '#ef4444' : pct < 50 ? '#f59e0b' : '#10b981';
-                ctx.fillStyle = color;
-                let fillWidth = (38 * pct) / 100;
-                if (fillWidth < 4) fillWidth = 4;
-                ctx.beginPath();
-                ctx.roundRect(10, 22, fillWidth, 22, 4);
-                ctx.fill();
-            }
-
-            // 文字
-            ctx.fillStyle = 'white';
-            ctx.font = 'bold 24px "Segoe UI", sans-serif';
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillText(pct >= 0 ? pct : '?', 29, 34);
-
-            return canvas.toDataURL('image/png');
-        }
-
         connectBtn.addEventListener('click', async () => {
+            console.log("按钮已点击，准备请求设备...");
             if (!navigator.hid) {
                 alert('当前环境不支持 WebHID');
                 return;
             }
             try {
-                // 只筛选雷柏设备
+                // 请求设备
+                console.log("正在调用 navigator.hid.requestDevice...");
                 const devices = await navigator.hid.requestDevice({ filters: [{ vendorId: 0x24AE }] });
-                if (devices.length === 0) return;
+                console.log("requestDevice 返回结果:", devices);
                 
-                device = devices[0];
-                
-                // 允许同时打开多个接口
-                for (const dev of devices) {
-                    if (!dev.opened) await dev.open();
-                    dev.addEventListener('inputreport', onInputReport);
+                if (devices.length === 0) {
+                    statusEl.textContent = '未选择设备或已取消';
+                    return;
                 }
                 
-                statusEl.textContent = `已连接：${device.productName || 'Rapoo'}，请在托盘中查看电量。`;
+                // 遍历设备并打开
+                for (const dev of devices) {
+                    console.log(`尝试打开设备: ${dev.productName}, opened: ${dev.opened}`);
+                    if (!dev.opened) {
+                        await dev.open();
+                    }
+                    dev.addEventListener('inputreport', onInputReport);
+                    console.log("设备打开成功并已绑定监听器");
+                }
+                
+                statusEl.textContent = `已连接：${devices[0].productName || 'Rapoo'}，请在托盘中查看电量。`;
                 statusEl.style.color = '#059669';
                 connectBtn.disabled = true;
                 
-                // 初始发送一次未知状态
                 window.electronAPI.updateBattery({ battery: -1, iconBase64: createIconBase64(-1) });
 
             } catch (err) {
+                console.error("连接过程发生错误:", err);
                 statusEl.textContent = '连接失败：' + err.message;
                 statusEl.style.color = '#dc2626';
             }
         });
-
-        function onInputReport(event) {
-            const { reportId, data } = event;
-            const bytes = new Uint8Array(data.buffer);
-
-            // 你之前验证过的协议：Report ID 7, Byte 7
-            if (reportId === 0x07 && bytes.length > 7) {
-                const pct = bytes[7];
-                if (pct >= 0 && pct <= 100) {
-                    // 将电量和新图标传给主进程
-                    window.electronAPI.updateBattery({
-                        battery: pct,
-                        iconBase64: createIconBase64(pct)
-                    });
-                }
-            }
-        }
-
-        // 启动时初始化托盘
-        window.onload = () => {
-            window.electronAPI.updateBattery({ battery: -1, iconBase64: createIconBase64(-1) });
-        };
-    </script>
-</body>
-</html>
