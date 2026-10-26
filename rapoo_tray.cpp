@@ -3,13 +3,19 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <hidapi/hidapi.h>
+#include <gdiplus.h>
+
 #include <atomic>
 #include <thread>
 #include <mutex>
 #include <string>
 #include <cstdio>
 
-// ==================== 协议常量（已确认） ====================
+#pragma comment(lib, "gdiplus.lib")
+
+using namespace Gdiplus;
+
+// ==================== 协议常量 ====================
 constexpr unsigned short RAPOO_VID         = 0x24AE;
 constexpr unsigned short VENDOR_USAGE_PAGE = 0xFF00;
 constexpr unsigned char  BATTERY_REPORT_ID = 0x07;
@@ -25,132 +31,122 @@ constexpr UINT ID_MENU_RECONNECT = 1002;
 std::atomic<int>  g_battery{ -1 };
 std::atomic<bool> g_running{ true };
 std::atomic<bool> g_connected{ false };
+std::atomic<bool> g_reconnect_requested{ false }; // 新增：安全重连标志
 hid_device*       g_hid = nullptr;
 HWND              g_hwnd = nullptr;
 HICON             g_currentIcon = nullptr;
 std::mutex        g_iconMutex;
 
+ULONG_PTR         g_gdiplusToken = 0;
+
 // ==================== 电池配色 ====================
-static COLORREF BatteryFillColor(int pct) {
-    if (pct < 0)  return RGB(170, 170, 170);
-    if (pct < 20) return RGB(239, 68, 68);   // 红
-    if (pct < 50) return RGB(245, 158, 11);  // 黄
-    return RGB(16, 185, 129);                // 绿
+static Color BatteryFillColor(int pct) {
+    if (pct < 0)  return Color(255, 170, 170, 170);
+    if (pct < 20) return Color(255, 239, 68, 68);   // 红
+    if (pct < 50) return Color(255, 245, 158, 11);  // 黄
+    return Color(255, 16, 185, 129);                // 绿
 }
 
-// ==================== 绘制 64x64 电池图标 ====================
+// ==================== GDI+ 绘制 64x64 电池图标 ====================
 static HICON CreateBatteryIcon(int pct) {
     const int SZ = 64;
-    BITMAPV5HEADER bi{};
-    bi.bV5Size = sizeof(bi);
-    bi.bV5Width = SZ;
-    bi.bV5Height = -SZ;              // 自上而下
-    bi.bV5Planes = 1;
-    bi.bV5BitCount = 32;
-    bi.bV5Compression = BI_BITFIELDS;
-    bi.bV5RedMask   = 0x00FF0000;
-    bi.bV5GreenMask = 0x0000FF00;
-    bi.bV5BlueMask  = 0x000000FF;
-    bi.bV5AlphaMask = 0xFF000000;
+    Bitmap bitmap(SZ, SZ, PixelFormat32bppARGB);
+    Graphics g(&bitmap);
+    
+    g.SetSmoothingMode(SmoothingModeAntiAlias);
+    g.SetTextRenderingHint(TextRenderingHintAntiAlias);
+    g.Clear(Color(0, 0, 0, 0)); // 完全透明背景
 
-    void* bits = nullptr;
-    HDC hdc = CreateCompatibleDC(nullptr);
-    HBITMAP hbm = CreateDIBSection(hdc, (BITMAPINFO*)&bi, DIB_RGB_COLORS, &bits, nullptr, 0);
-    if (!hbm || !bits) { DeleteDC(hdc); return nullptr; }
-    HGDIOBJ oldBmp = SelectObject(hdc, hbm);
-    memset(bits, 0, SZ * SZ * 4);
-    SetBkMode(hdc, TRANSPARENT);
+    // 几何参数
+    const float bodyL = 6.0f,  bodyT = 18.0f, bodyR = 52.0f, bodyB = 48.0f;
+    const float capL  = 52.0f, capT  = 26.0f, capR  = 58.0f, capB  = 40.0f;
+    
+    // 1. 画外框（深灰，带圆角，包含头部的凸起）
+    SolidBrush frameBrush(Color(255, 70, 70, 70));
+    GraphicsPath path;
+    float r = 8.0f; // 圆角半径
+    
+    path.AddArc(bodyL, bodyT, r, r, 180, 90);
+    path.AddArc(bodyR - r, bodyT, r, r, 270, 90);
+    path.AddLine(bodyR, bodyT + r, capL, bodyT + r);
+    path.AddLine(capL, capT, capR, capT);
+    path.AddLine(capR, capT, capR, capB);
+    path.AddLine(capR, capB, capL, capB);
+    path.AddLine(capL, bodyB - r, bodyR, bodyB - r);
+    path.AddArc(bodyR - r, bodyB - r, r, r, 0, 90);
+    path.AddArc(bodyL, bodyB - r, r, r, 90, 90);
+    path.AddArc(bodyL, bodyT, r, r, 180, 90);
+    path.CloseFigure();
+    g.FillPath(&frameBrush, &path);
 
-    // 几何：电池主体 + 顶部凸起
-    const int bodyL = 6,  bodyT = 18, bodyR = 52, bodyB = 48;
-    const int capL  = 52, capT  = 26, capR  = 58, capB  = 40;
-    const int innerL = bodyL + 4, innerT = bodyT + 4;
-    const int innerR = bodyR - 4, innerB = bodyB - 4;
-    const int innerW = innerR - innerL;
+    // 2. 画内衬（白色背景）
+    const float innerL = bodyL + 4, innerT = bodyT + 4;
+    const float innerR = bodyR - 4, innerB = bodyB - 4;
+    const float innerW = innerR - innerL;
+    
+    SolidBrush innerBrush(Color(255, 250, 250, 250));
+    GraphicsPath innerPath;
+    float ir = 4.0f;
+    innerPath.AddArc(innerL, innerT, ir, ir, 180, 90);
+    innerPath.AddArc(innerR - ir, innerT, ir, ir, 270, 90);
+    innerPath.AddArc(innerR - ir, innerB - ir, ir, ir, 0, 90);
+    innerPath.AddArc(innerL, innerB - ir, ir, ir, 90, 90);
+    innerPath.CloseFigure();
+    g.FillPath(&innerBrush, &innerPath);
 
-    // 1. 外框（深灰，实心圆角矩形）
-    {
-        HBRUSH br = CreateSolidBrush(RGB(64, 64, 64));
-        HPEN   pn = CreatePen(PS_SOLID, 0, RGB(64, 64, 64));
-        HGDIOBJ ob = SelectObject(hdc, br);
-        HGDIOBJ op = SelectObject(hdc, pn);
-        RoundRect(hdc, bodyL, bodyT, bodyR, bodyB, 10, 10);
-        RoundRect(hdc, capL,  capT,  capR,  capB,  3,  3);
-        SelectObject(hdc, ob); SelectObject(hdc, op);
-        DeleteObject(br); DeleteObject(pn);
-    }
-
-    // 2. 内衬（白色）
-    {
-        HBRUSH br = CreateSolidBrush(RGB(245, 245, 245));
-        HPEN   pn = CreatePen(PS_SOLID, 0, RGB(245, 245, 245));
-        HGDIOBJ ob = SelectObject(hdc, br);
-        HGDIOBJ op = SelectObject(hdc, pn);
-        RoundRect(hdc, innerL, innerT, innerR, innerB, 7, 7);
-        SelectObject(hdc, ob); SelectObject(hdc, op);
-        DeleteObject(br); DeleteObject(pn);
-    }
-
-    // 3. 电量填充
+    // 3. 画电量填充
     if (pct > 0) {
-        int fillW = (innerW * pct + 50) / 100;
-        if (fillW < 3) fillW = 3;   // 确保极小电量也可见
+        float fillW = (innerW * pct) / 100.0f;
+        if (fillW < 4.0f) fillW = 4.0f;
         if (fillW > innerW) fillW = innerW;
-        COLORREF col = BatteryFillColor(pct);
-        HBRUSH br = CreateSolidBrush(col);
-        HPEN   pn = CreatePen(PS_SOLID, 0, col);
-        HGDIOBJ ob = SelectObject(hdc, br);
-        HGDIOBJ op = SelectObject(hdc, pn);
-        RoundRect(hdc, innerL, innerT, innerL + fillW, innerB, 6, 6);
-        SelectObject(hdc, ob); SelectObject(hdc, op);
-        DeleteObject(br); DeleteObject(pn);
+
+        SolidBrush fillBrush(BatteryFillColor(pct));
+        GraphicsPath fillPath;
+        fillPath.AddArc(innerL, innerT, ir, ir, 180, 90);
+        fillPath.AddLine(innerL + ir, innerT, innerL + fillW, innerT);
+        fillPath.AddLine(innerL + fillW, innerT, innerL + fillW, innerB);
+        fillPath.AddLine(innerL + fillW, innerB, innerL + ir, innerB);
+        fillPath.AddArc(innerL, innerB - ir, ir, ir, 90, 90);
+        fillPath.AddArc(innerL, innerT, ir, ir, 180, 90);
+        fillPath.CloseFigure();
+        
+        if (fillW < 8.0f) {
+            g.FillRectangle(&fillBrush, innerL, innerT, fillW, innerB - innerT);
+        } else {
+            g.FillPath(&fillBrush, &fillPath);
+        }
     }
 
-    // 4. 电量数字（动态字号：1 位最大，3 位最小）
+    // 4. 画数字
     wchar_t txt[8];
     if (pct >= 0) swprintf_s(txt, L"%d", pct);
     else          wcscpy_s(txt, L"?");
 
-    int fontSize;
-    if (pct >= 100)      fontSize = 20;
-    else if (pct >= 10)  fontSize = 24;
-    else                 fontSize = 28;
+    float fontSize = 28.0f;
+    if (pct >= 100) fontSize = 20.0f;
+    else if (pct >= 10) fontSize = 26.0f;
 
-    HFONT font = CreateFontW(
-        fontSize, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI"
-    );
-    HGDIOBJ oldFont = SelectObject(hdc, font);
+    FontFamily fontFamily(L"Segoe UI");
+    Font font(&fontFamily, fontSize, FontStyleBold, UnitPixel);
+    
+    StringFormat format;
+    format.SetAlignment(StringAlignmentCenter);
+    format.SetLineAlignment(StringAlignmentCenter);
 
-    RECT tr{ bodyL, bodyT, bodyR, bodyB };
+    RectF textRect(bodyL, bodyT, bodyR - bodyL, bodyB - bodyT);
 
-    // 阴影（黑色，偏移 1px）
-    SetTextColor(hdc, RGB(0, 0, 0));
-    RECT sh = tr;
-    OffsetRect(&sh, 1, 1);
-    DrawTextW(hdc, txt, -1, &sh, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SolidBrush shadowBrush(Color(150, 0, 0, 0));
+    RectF shadowRect = textRect;
+    shadowRect.X += 1.0f;
+    shadowRect.Y += 1.0f;
+    g.DrawString(txt, -1, &font, shadowRect, &format, &shadowBrush);
 
-    // 正文（白色）
-    SetTextColor(hdc, RGB(255, 255, 255));
-    DrawTextW(hdc, txt, -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SolidBrush textBrush(Color(255, 255, 255, 255));
+    g.DrawString(txt, -1, &font, textRect, &format, &textBrush);
 
-    SelectObject(hdc, oldFont);
-    DeleteObject(font);
-    SelectObject(hdc, oldBmp);
-
-    // 5. 转 HICON
-    HBITMAP mask = CreateBitmap(SZ, SZ, 1, 1, nullptr);
-    ICONINFO ii{};
-    ii.fIcon = TRUE;
-    ii.hbmColor = hbm;
-    ii.hbmMask = mask;
-    HICON icon = CreateIconIndirect(&ii);
-
-    DeleteObject(hbm);
-    DeleteObject(mask);
-    DeleteDC(hdc);
-    return icon;
+    HICON hIcon = nullptr;
+    bitmap.GetHICON(&hIcon);
+    return hIcon;
 }
 
 // ==================== 托盘更新 ====================
@@ -199,7 +195,10 @@ static void ReaderThread() {
         if (!dev) {
             g_connected = false;
             if (g_battery.load() != -1) { g_battery = -1; UpdateTray(-1); }
-            for (int i = 0; i < 30 && g_running.load(); ++i) Sleep(100);
+            for (int i = 0; i < 30 && g_running.load(); ++i) {
+                if (g_reconnect_requested.load()) break;
+                Sleep(100);
+            }
             continue;
         }
 
@@ -208,9 +207,16 @@ static void ReaderThread() {
 
         unsigned char buf[64];
         while (g_running.load()) {
+            // 安全响应主线程的“重新连接”请求
+            if (g_reconnect_requested.load()) {
+                g_reconnect_requested = false;
+                break;
+            }
+
             int n = hid_read_timeout(dev, buf, sizeof(buf), 500);
-            if (n < 0) break;                       // 设备断开
-            if (n == 0) continue;                   // 超时
+            if (n < 0) break;
+            if (n == 0) continue;
+            
             if (n > 1 + BATTERY_BYTE_INDEX && buf[0] == BATTERY_REPORT_ID) {
                 int pct = buf[1 + BATTERY_BYTE_INDEX];
                 if (pct >= 0 && pct <= 100 && pct != g_battery.load()) {
@@ -220,13 +226,14 @@ static void ReaderThread() {
             }
         }
 
+        // 句柄由读取线程自己安全关闭
         hid_close(dev);
         g_hid = nullptr;
         g_connected = false;
         if (g_battery.load() != -1) { g_battery = -1; UpdateTray(-1); }
 
         if (!g_running.load()) break;
-        for (int i = 0; i < 20 && g_running.load(); ++i) Sleep(100);
+        for (int i = 0; i < 10 && g_running.load(); ++i) Sleep(100);
     }
 }
 
@@ -238,7 +245,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             POINT pt; GetCursorPos(&pt);
             HMENU menu = CreatePopupMenu();
 
-            // 电量信息项（禁用状态，仅显示）
             wchar_t info[64];
             if (g_battery.load() >= 0) swprintf_s(info, L"电量：%d%%", g_battery.load());
             else                       wcscpy_s(info, L"电量：未知");
@@ -259,13 +265,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_COMMAND:
         if (LOWORD(wp) == ID_MENU_EXIT) {
             g_running = false;
-            if (g_hid) hid_close(g_hid);
             PostMessage(hwnd, WM_CLOSE, 0, 0);
         } else if (LOWORD(wp) == ID_MENU_RECONNECT) {
-            g_running = false;
-            if (g_hid) hid_close(g_hid);
-            g_running = true;
-            std::thread(ReaderThread).detach();
+            // 只发信号，交给读取线程自己断开重连，避免句柄冲突崩溃
+            g_reconnect_requested = true;
         }
         return 0;
 
@@ -278,8 +281,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 // ==================== 入口 ====================
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
+    GdiplusStartupInput gdiplusStartupInput;
+    GdiplusStartup(&g_gdiplusToken, &gdiplusStartupInput, nullptr);
+
     if (hid_init() != 0) {
         MessageBoxW(nullptr, L"hidapi 初始化失败", L"错误", MB_ICONERROR);
+        GdiplusShutdown(g_gdiplusToken);
         return 1;
     }
 
@@ -292,7 +301,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
 
     g_hwnd = CreateWindowExW(0, L"RapooTrayWnd", L"RapooTray", 0,
                              0, 0, 0, 0, HWND_MESSAGE, nullptr, hInst, nullptr);
-    if (!g_hwnd) { hid_exit(); return 1; }
+    if (!g_hwnd) { 
+        hid_exit(); 
+        GdiplusShutdown(g_gdiplusToken);
+        return 1; 
+    }
 
     HICON initIcon = CreateBatteryIcon(-1);
     g_currentIcon = initIcon;
@@ -317,7 +330,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
 
     g_running = false;
     if (reader.joinable()) reader.join();
-    if (g_hid) { hid_close(g_hid); g_hid = nullptr; }
+    // 退出时不再强制 hid_close，后台线程已经自己收尾了
 
     Shell_NotifyIconW(NIM_DELETE, &nid);
     {
@@ -326,5 +339,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     }
 
     hid_exit();
+    GdiplusShutdown(g_gdiplusToken);
     return 0;
 }
