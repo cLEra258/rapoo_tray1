@@ -9,15 +9,16 @@ find_package(hidapi CONFIG REQUIRED)
 
 find_path(HIDAPI_INCLUDE_DIR NAMES hidapi/hidapi.h)
 if(NOT HIDAPI_INCLUDE_DIR)
-    message(FATAL_ERROR "找不到 hidapi/hidapi.h，请确认 vcpkg 已安装 hidapi")
+    message(FATAL_ERROR "找不到 hidapi/hidapi.h")
 endif()
 
 add_executable(rapoo_tray WIN32 rapoo_tray.cpp)
 target_include_directories(rapoo_tray PRIVATE ${HIDAPI_INCLUDE_DIR})
-target_link_libraries(rapoo_tray PRIVATE hidapi::hidapi user32 gdi32 shell32)
+
+# 加入了 gdiplus
+target_link_libraries(rapoo_tray PRIVATE hidapi::hidapi user32 gdi32 shell32 gdiplus)
 
 if (MSVC)
-    # /utf-8 修复中文字面量乱码，/O2 /GL /Gy /Gw 优化体积与速度
     target_compile_options(rapoo_tray PRIVATE /utf-8 /O2 /GL /Gy /Gw)
     target_link_options(rapoo_tray PRIVATE /LTCG /OPT:REF /OPT:ICF)
 endif()
