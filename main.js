@@ -4,14 +4,14 @@ const path = require('path');
 let tray = null;
 let mainWindow = null;
 
-// 生成托盘图标的 Base64 (占位透明图)
+// 默认透明图标
 const defaultIcon = nativeImage.createFromDataURL('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=');
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 400,
-    height: 300,
-    show: true, // 默认显示，确保可以弹窗
+    width: 500,
+    height: 400,
+    show: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
@@ -20,8 +20,10 @@ function createWindow() {
   });
 
   mainWindow.loadFile('index.html');
+  
+  // 自动打开开发者工具，方便查看 console.log
+  mainWindow.webContents.openDevTools();
 
-  // 窗口关闭时隐藏，而不是退出程序
   mainWindow.on('close', (event) => {
     if (!app.isQuitting) {
       event.preventDefault();
@@ -40,23 +42,16 @@ function createTray() {
       { type: 'separator' },
       { label: '显示控制台', click: () => mainWindow.show() },
       { type: 'separator' },
-      { label: '退出', click: () => {
-          app.isQuitting = true;
-          app.quit();
-        } 
-      }
+      { label: '退出', click: () => { app.isQuitting = true; app.quit(); } }
     ]);
     tray.setContextMenu(contextMenu);
   };
-
+  
   updateMenu('电量：未知');
 
-  tray.on('double-click', () => {
-    mainWindow.show();
-  });
+  tray.on('double-click', () => mainWindow.show());
 }
 
-// 接收来自 index.html 的电量数据
 ipcMain.on('battery-update', (event, data) => {
   const { battery, iconBase64 } = data;
   
@@ -67,7 +62,6 @@ ipcMain.on('battery-update', (event, data) => {
 
   if (battery >= 0) {
     tray.setToolTip(`Rapoo 鼠标 — 电量 ${battery}%`);
-    // 为了省事，我们这里直接重新构建菜单
     const contextMenu = Menu.buildFromTemplate([
       { label: `电量：${battery}%`, enabled: false },
       { type: 'separator' },
@@ -83,17 +77,39 @@ ipcMain.on('battery-update', (event, data) => {
 });
 
 app.whenReady().then(() => {
-  // 【关键修复】接管 WebHID 的设备选择请求
-  session.defaultSession.on('select-hid-device', (event, details, callback) => {
-    // 阻止默认行为，由我们手动放行
+  // 【核心修复】处理 WebHID 权限和自动选择设备
+  const defaultSession = session.defaultSession;
+
+  // 1. 允许网页请求 HID 权限
+  defaultSession.setPermissionCheckHandler((wc, permission) => {
+    if (permission === 'hid') return true;
+    return false;
+  });
+
+  defaultSession.setDevicePermissionHandler((details) => {
+    return true;
+  });
+
+  // 2. 接管选择事件，防止 Promise 挂起
+  defaultSession.on('select-hid-device', (event, details, callback) => {
     event.preventDefault();
     
-    // 自动选择第一个设备，或者可以通过对话框让用户选
+    console.log('=== 触发了 select-hid-device ===');
+    console.log('系统枚举到的 HID 设备列表:', details.deviceList);
+    
     if (details.deviceList && details.deviceList.length > 0) {
-      // 给系统一点时间，自动选择第一个（通常就是雷柏接收器）
-      callback(details.deviceList[0].deviceId);
+      // 优先查找雷柏 VID: 0x24AE (9418)
+      const rapooDev = details.deviceList.find(d => d.vendorId === 0x24AE);
+      if (rapooDev) {
+        console.log('找到雷柏设备，自动选择:', rapooDev.deviceId);
+        callback(rapooDev.deviceId);
+      } else {
+        console.log('未找到雷柏 VID，暂选第一个设备:', details.deviceList[0].deviceId);
+        callback(details.deviceList[0].deviceId);
+      }
     } else {
-      callback();
+      console.log('⚠️ 未发现任何 HID 设备，返回空');
+      callback(); 
     }
   });
 
@@ -103,6 +119,5 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
-    // 保持后台运行
   }
 });
